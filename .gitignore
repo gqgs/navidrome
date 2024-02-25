@@ -26,3 +26,4 @@ tags
 docker-compose.yml
 !contrib/docker-compose.yml
 test-123.db
+navidrome.backup.db

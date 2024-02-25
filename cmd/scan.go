@@ -8,8 +8,10 @@ import (
 )
 
 var fullRescan bool
+var folder string
 
 func init() {
+	scanCmd.Flags().StringVar(&folder, "folder", "", "folder to scan")
 	scanCmd.Flags().BoolVarP(&fullRescan, "full", "f", false, "check all subfolders, ignoring timestamps")
 	rootCmd.AddCommand(scanCmd)
 }
@@ -24,11 +26,14 @@ var scanCmd = &cobra.Command{
 }
 
 func runScanner() {
+	if folder == "" {
+		log.Fatal("folder must not be empty")
+	}
+
 	scanner := GetScanner()
-	_ = scanner.RescanAll(context.Background(), fullRescan)
-	if fullRescan {
-		log.Info("Finished full rescan")
-	} else {
-		log.Info("Finished rescan")
+
+	err := scanner.RescanFolder(context.Background(), folder)
+	if err != nil {
+		log.Error(err)
 	}
 }

@@ -18,6 +18,7 @@ import (
 type Scanner interface {
 	RescanAll(ctx context.Context, fullRescan bool) error
 	Status(mediaFolder string) (*StatusInfo, error)
+	RescanFolder(ctx context.Context, folder string) error
 }
 
 type StatusInfo struct {
@@ -36,6 +37,7 @@ var (
 type FolderScanner interface {
 	// Scan process finds any changes after `lastModifiedSince` and returns the number of changes found
 	Scan(ctx context.Context, lastModifiedSince time.Time, progress chan uint32) (int64, error)
+	ScanFolder(ctx context.Context, lastModifiedSince time.Time, folder string, progress chan uint32) (int64, error)
 }
 
 var isScanning sync.Mutex
@@ -90,6 +92,34 @@ func (s *scanner) rescan(ctx context.Context, mediaFolder string, fullRescan boo
 	defer cancel()
 
 	changeCount, err := folderScanner.Scan(ctx, lastModifiedSince, progress)
+	if err != nil {
+		log.Error("Error importing MediaFolder", "folder", mediaFolder, err)
+	}
+
+	if changeCount > 0 {
+		log.Debug(ctx, "Detected changes in the music folder. Sending refresh event",
+			"folder", mediaFolder, "changeCount", changeCount)
+		// Don't use real context, forcing a refresh in all open windows, including the one that triggered the scan
+		s.broker.SendMessage(context.Background(), &events.RefreshResource{})
+	}
+
+	s.updateLastModifiedSince(mediaFolder, start)
+	return err
+}
+
+func (s *scanner) rescanFolder(ctx context.Context, mediaFolder, folder string) error {
+	folderScanner := s.folders[mediaFolder]
+	start := time.Now()
+
+	s.setStatusStart(mediaFolder)
+	defer s.setStatusEnd(mediaFolder, start)
+
+	lastModifiedSince := time.Time{}
+
+	progress, cancel := s.startProgressTracker(mediaFolder)
+	defer cancel()
+
+	changeCount, err := folderScanner.ScanFolder(ctx, lastModifiedSince, folder, progress)
 	if err != nil {
 		log.Error("Error importing MediaFolder", "folder", mediaFolder, err)
 	}
@@ -198,6 +228,29 @@ func (s *scanner) RescanAll(ctx context.Context, fullRescan bool) error {
 	core.WriteAfterScanMetrics(ctx, s.ds, true)
 	return nil
 }
+
+func (s *scanner) RescanFolder(ctx context.Context, folder string) error {
+	ctx = context.WithoutCancel(ctx)
+	if !isScanning.TryLock() {
+		log.Debug(ctx, "Scanner already running, ignoring request for rescan.")
+		return ErrAlreadyScanning
+	}
+	defer isScanning.Unlock()
+
+	var hasError bool
+	for dbFolder := range s.folders {
+		err := s.rescanFolder(ctx, dbFolder, folder)
+		hasError = hasError || err != nil
+	}
+	if hasError {
+		log.Error(ctx, "Errors while scanning media. Please check the logs")
+		core.WriteAfterScanMetrics(ctx, s.ds, false)
+		return ErrScanError
+	}
+	core.WriteAfterScanMetrics(ctx, s.ds, true)
+	return nil
+}
+
 func (s *scanner) Status(mediaFolder string) (*StatusInfo, error) {
 	status, ok := s.getStatus(mediaFolder)
 	if !ok {

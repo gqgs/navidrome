@@ -169,6 +169,57 @@ func (s *TagScanner) Scan(ctx context.Context, lastModifiedSince time.Time, prog
 	return s.cnt.total(), err
 }
 
+func (s *TagScanner) ScanFolder(ctx context.Context, lastModifiedSince time.Time, folder string, progress chan uint32) (int64, error) {
+	ctx = auth.WithAdminUser(ctx, s.ds)
+	start := time.Now()
+
+	// Special case: if lastModifiedSince is zero, re-import all files
+	fullScan := lastModifiedSince.IsZero()
+
+	// If the media folder is empty (no music and no subfolders), abort to avoid deleting all data from DB
+	empty, err := isDirEmpty(ctx, s.rootFolder)
+	if err != nil {
+		return 0, err
+	}
+	if empty && !fullScan {
+		log.Error(ctx, "Media Folder is empty. Aborting scan.", "folder", s.rootFolder)
+		return 0, nil
+	}
+
+	allFSDirs := dirMap{}
+	s.cnt = &counters{}
+	genres := newCachedGenreRepository(ctx, s.ds.Genre(ctx))
+	s.mapper = NewMediaFileMapper(s.rootFolder, genres)
+	refresher := newRefresher(s.ds, s.cacheWarmer, allFSDirs)
+
+	log.Trace(ctx, "Loading directory tree from music folder", "folder", folder)
+	foldersFound, walkerError := walkDirTree(ctx, folder)
+
+	for {
+		folderStats, more := <-foldersFound
+		if !more {
+			break
+		}
+		progress <- folderStats.AudioFilesCount
+		log.Debug("Processing changed folder", "dir", folderStats.Path)
+		err := s.processChangedDir(ctx, refresher, fullScan, folderStats.Path)
+		if err != nil {
+			log.Error("Error updating folder in the DB", "dir", folderStats.Path, err)
+		}
+	}
+
+	if err := <-walkerError; err != nil {
+		log.Error("Scan was interrupted by error. See errors above", err)
+		return 0, err
+	}
+
+	err = s.ds.GC(log.NewContext(ctx), s.rootFolder)
+	log.Info("Finished processing Music Folder", "folder", s.rootFolder, "elapsed", time.Since(start),
+		"added", s.cnt.added, "updated", s.cnt.updated, "deleted", s.cnt.deleted, "playlistsImported", s.cnt.playlists)
+
+	return s.cnt.total(), err
+}
+
 func isDirEmpty(ctx context.Context, dir string) (bool, error) {
 	children, stats, err := loadDir(ctx, dir)
 	if err != nil {
